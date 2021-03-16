@@ -3,9 +3,13 @@ using MpesaSdk.Dtos;
 using MpesaSdk.Exceptions;
 using MpesaSdk.Interfaces;
 using MpesaSdk.Response;
+using MpesaSdk.Validators;
 using Newtonsoft.Json;
 using Polly;
+using Polly.Extensions.Http;
 using System;
+using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -21,26 +25,41 @@ namespace MpesaSdk
     public class MpesaClient : IMpesaClient
     {
         private readonly HttpClient _client;
-        private static readonly CancellationTokenSource _tokenSource = new CancellationTokenSource();
-        private static CancellationToken _token = new CancellationToken();
         Random jitterer = new Random();
+        private JsonSerializer _serializer = new JsonSerializer();
 
         /// <summary>
         /// MpesaClient that creates a client using httpclientfactory
         /// </summary>
         /// <param name="client">HttpClient Instance from httpClientFactory</param>
-        public MpesaClient()
+        public MpesaClient(Enums.Environment environment)
         {
+            var retryPolicy = HttpPolicyExtensions.HandleTransientHttpError()
+                .WaitAndRetryAsync(1, retryAttempt =>
+                {
+                    return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) + TimeSpan.FromMilliseconds(jitterer.Next(0, 100));
+                });
+
+            var noOpPolicy = Policy.NoOpAsync().AsAsyncPolicy<HttpResponseMessage>();
+
             var services = new ServiceCollection();
             services.AddHttpClient("MpesaApiClient", client =>
             {
-#if DEBUG
-                client.BaseAddress = MpesaRequestEndpoint.SandboxBaseAddress;
-                client.Timeout = TimeSpan.FromMinutes(10);
-#else
-                client.BaseAddress = MpesaRequestEndpoint.LiveBaseAddress;
-                client.Timeout = TimeSpan.FromMinutes(10);
-#endif
+                switch (environment)
+                {
+                    case Enums.Environment.Sandbox:
+                        client.BaseAddress = MpesaRequestEndpoint.SandboxBaseAddress;
+                        client.Timeout = TimeSpan.FromMinutes(10);
+                        break;
+
+                    case Enums.Environment.Live:
+                        client.BaseAddress = MpesaRequestEndpoint.LiveBaseAddress;
+                        client.Timeout = TimeSpan.FromMinutes(10);
+                        break;
+
+                    default:
+                        break;
+                }
             }).ConfigurePrimaryHttpMessageHandler(messageHandler =>
             {
                 var handler = new HttpClientHandler();
@@ -51,17 +70,13 @@ namespace MpesaSdk
                 }
 
                 return handler;
-            }).AddTransientHttpErrorPolicy(builder => builder.WaitAndRetryAsync(1, retryAttempt =>
-            {
-                return TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)) + TimeSpan.FromMilliseconds(jitterer.Next(0, 100));
-            }));
+            }).AddPolicyHandler(request => request.Method.Equals(HttpMethod.Get) ? retryPolicy : noOpPolicy);
 
             var serviceProvider = services.BuildServiceProvider();
 
             var httpClientFactory = serviceProvider.GetService<IHttpClientFactory>();
 
             _client = httpClientFactory.CreateClient("MpesaApiClient");
-            _token = _tokenSource.Token;
         }
 
         /// <summary>
@@ -71,7 +86,6 @@ namespace MpesaSdk
         public MpesaClient(HttpClient client)
         {
             _client = client;
-            _token = _tokenSource.Token;
         }
 
         /// <summary>
@@ -80,10 +94,11 @@ namespace MpesaSdk
         /// <param name="consumerKey">ConsumerKey provided by Safaricom in Daraja Portal.</param>
         /// <param name="consumerSecret">ConsumerSecret provided by Safaricom in Daraja Portal.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.AuthToken</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A string of characters representing the accesstoken.</returns>
-        public string GetAuthToken(string consumerKey, string consumerSecret, string mpesaRequestEndpoint)
+        public string GetAuthToken(string consumerKey, string consumerSecret, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return RequestAccessTokenAsync(consumerKey, consumerSecret, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            return RequestAccessTokenAsync(consumerKey, consumerSecret, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -92,10 +107,11 @@ namespace MpesaSdk
         /// <param name="consumerKey">ConsumerKey provided by Safaricom in Daraja Portal.</param>
         /// <param name="consumerSecret">ConsumerSecret provided by Safaricom in Daraja Portal.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.AuthToken</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A string of characters representing the accesstoken.</returns>
-        public async Task<string> GetAuthTokenAsync(string consumerKey, string consumerSecret, string mpesaRequestEndpoint)
+        public async Task<string> GetAuthTokenAsync(string consumerKey, string consumerSecret, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await RequestAccessTokenAsync(consumerKey, consumerSecret, mpesaRequestEndpoint);
+            return await RequestAccessTokenAsync(consumerKey, consumerSecret, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -104,10 +120,11 @@ namespace MpesaSdk
         /// <param name="businessToBusiness">B2B data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.BusinessToBusiness</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public MpesaResponse MakeB2BPayment(BusinessToBusiness businessToBusiness, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse MakeB2BPayment(BusinessToBusiness businessToBusiness, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(businessToBusiness, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            return MpesaPostRequestAsync<MpesaResponse>(businessToBusiness, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -116,10 +133,11 @@ namespace MpesaSdk
         /// <param name="businessToBusiness">B2B data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.BusinessToBusiness</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public async Task<MpesaResponse> MakeB2BPaymentAsync(BusinessToBusiness businessToBusiness, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> MakeB2BPaymentAsync(BusinessToBusiness businessToBusiness, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(businessToBusiness, accesstoken, mpesaRequestEndpoint);
+            return await MpesaPostRequestAsync<MpesaResponse>(businessToBusiness, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -128,13 +146,19 @@ namespace MpesaSdk
         /// <param name="businessToCustomer">B2C data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.BusinessToCustomer</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
         /// <remarks>
         /// Suitable for refunds, rewards or just about any transaction that involves a business paying a customer.
         /// </remarks>
-        public MpesaResponse MakeB2CPayment(BusinessToCustomer businessToCustomer, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse MakeB2CPayment(BusinessToCustomer businessToCustomer, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(businessToCustomer, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new BusinessToCustomerValidator();
+            var results = validator.Validate(businessToCustomer);
+
+            return !results.IsValid 
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(businessToCustomer, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -143,13 +167,19 @@ namespace MpesaSdk
         /// <param name="businessToCustomer">B2C data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.BusinessToCustomer</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
         /// <remarks>
         /// Suitable for refunds, rewards or just about any transaction that involves a business paying a customer.
         /// </remarks>
-        public async Task<MpesaResponse> MakeB2CPaymentAsync(BusinessToCustomer businessToCustomer, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> MakeB2CPaymentAsync(BusinessToCustomer businessToCustomer, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(businessToCustomer, accesstoken, mpesaRequestEndpoint);
+            var validator = new BusinessToCustomerValidator();
+            var results = await validator.ValidateAsync(businessToCustomer);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(businessToCustomer, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -158,15 +188,21 @@ namespace MpesaSdk
         /// <param name="customerToBusinessSimulate">C2B data transfer object</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.CustomerToBusinessSimulate</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
         /// <remarks>
         /// Use only for Simulation/testing. In production use <c>RegisterC2BUrlAsync</c> method to register 
         /// endpoints in your application that receive customer initiated transactions from the MPESA API
         /// for confirmation and/or validation
         /// </remarks>
-        public MpesaResponse MakeC2BPayment(CustomerToBusinessSimulate customerToBusinessSimulate, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse MakeC2BPayment(CustomerToBusinessSimulate customerToBusinessSimulate, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(customerToBusinessSimulate, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new CustomerToBusinessSimulateTransactionValidator();
+            var results = validator.Validate(customerToBusinessSimulate);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(customerToBusinessSimulate, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -175,15 +211,21 @@ namespace MpesaSdk
         /// <param name="customerToBusinessSimulate">C2B data transfer object</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.CustomerToBusinessSimulate</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
         /// <remarks>
         /// Use only for Simulation/testing. In production use <c>RegisterC2BUrlAsync</c> method to register 
         /// endpoints in your application that receive customer initiated transactions from the MPESA API
         /// for confirmation and/or validation
         /// </remarks>
-        public async Task<MpesaResponse> MakeC2BPaymentAsync(CustomerToBusinessSimulate customerToBusinessSimulate, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> MakeC2BPaymentAsync(CustomerToBusinessSimulate customerToBusinessSimulate, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(customerToBusinessSimulate, accesstoken, mpesaRequestEndpoint);
+            var validator = new CustomerToBusinessSimulateTransactionValidator();
+            var results = await validator.ValidateAsync(customerToBusinessSimulate);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(customerToBusinessSimulate, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -194,10 +236,16 @@ namespace MpesaSdk
         /// </param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.LipaNaMpesaOnline</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing LNMO response data from MPESA API Server</returns>
-        public LipaNaMpesaOnlinePushStkResponse MakeLipaNaMpesaOnlinePayment(LipaNaMpesaOnline lipaNaMpesaOnline, string accesstoken, string mpesaRequestEndpoint)
+        public LipaNaMpesaOnlinePushStkResponse MakeLipaNaMpesaOnlinePayment(LipaNaMpesaOnline lipaNaMpesaOnline, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<LipaNaMpesaOnlinePushStkResponse>(lipaNaMpesaOnline, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new LipaNaMpesaOnlineValidator();
+            var results = validator.Validate(lipaNaMpesaOnline);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<LipaNaMpesaOnlinePushStkResponse>(lipaNaMpesaOnline, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -208,10 +256,16 @@ namespace MpesaSdk
         /// </param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.LipaNaMpesaOnline</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing LNMO response data from MPESA API Server</returns>
-        public async Task<LipaNaMpesaOnlinePushStkResponse> MakeLipaNaMpesaOnlinePaymentAsync(LipaNaMpesaOnline lipaNaMpesaOnline, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<LipaNaMpesaOnlinePushStkResponse> MakeLipaNaMpesaOnlinePaymentAsync(LipaNaMpesaOnline lipaNaMpesaOnline, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<LipaNaMpesaOnlinePushStkResponse>(lipaNaMpesaOnline, accesstoken, mpesaRequestEndpoint);
+            var validator = new LipaNaMpesaOnlineValidator();
+            var results = await validator.ValidateAsync(lipaNaMpesaOnline);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<LipaNaMpesaOnlinePushStkResponse>(lipaNaMpesaOnline, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -220,10 +274,16 @@ namespace MpesaSdk
         /// <param name="accountBalance">Account balance query data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.QueryAccountBalance</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public MpesaResponse QueryAccountBalance(AccountBalance accountBalance, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse QueryAccountBalance(AccountBalance accountBalance, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(accountBalance, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new AccountBalanceValidator();
+            var results = validator.Validate(accountBalance);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(accountBalance, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -232,10 +292,16 @@ namespace MpesaSdk
         /// <param name="accountBalance">Account balance query data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.QueryAccountBalance</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public async Task<MpesaResponse> QueryAccountBalanceAsync(AccountBalance accountBalance, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> QueryAccountBalanceAsync(AccountBalance accountBalance, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(accountBalance, accesstoken, mpesaRequestEndpoint);
+            var validator = new AccountBalanceValidator();
+            var results = await validator.ValidateAsync(accountBalance);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(accountBalance, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -244,6 +310,7 @@ namespace MpesaSdk
         /// <param name="lipaNaMpesaQuery">Transaction Query Data transfer object</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.QueryLipaNaMpesaOnlieTransaction</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>
         /// A JSON string containing data from MPESA API reposnse
         /// </returns>
@@ -251,9 +318,14 @@ namespace MpesaSdk
         /// Use only for transactions initiated with <c>MakeLipaNaMpesaOnlinePayment</c> method.
         /// For Other transaction based methods (C2B,B2C,B2B) use <c>QueryMpesaTransactionStatusAsync</c> method.
         /// </remarks>
-        public LipaNaMpesaQueryStkResponse QueryLipaNaMpesaTransaction(LipaNaMpesaQuery lipaNaMpesaQuery, string accesstoken, string mpesaRequestEndpoint)
+        public LipaNaMpesaQueryStkResponse QueryLipaNaMpesaTransaction(LipaNaMpesaQuery lipaNaMpesaQuery, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<LipaNaMpesaQueryStkResponse>(lipaNaMpesaQuery, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new LipaNaMpesaQueryValidator();
+            var results = validator.Validate(lipaNaMpesaQuery);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<LipaNaMpesaQueryStkResponse>(lipaNaMpesaQuery, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -262,6 +334,7 @@ namespace MpesaSdk
         /// <param name="lipaNaMpesaQuery">Transaction Query Data transfer object</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.QueryLipaNaMpesaOnlieTransaction</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>
         /// A JSON string containing data from MPESA API reposnse
         /// </returns>
@@ -269,9 +342,14 @@ namespace MpesaSdk
         /// Use only for transactions initiated with <c>MakeLipaNaMpesaOnlinePayment</c> method.
         /// For Other transaction based methods (C2B,B2C,B2B) use <c>QueryMpesaTransactionStatusAsync</c> method.
         /// </remarks>
-        public async Task<LipaNaMpesaQueryStkResponse> QueryLipaNaMpesaTransactionAsync(LipaNaMpesaQuery lipaNaMpesaQuery, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<LipaNaMpesaQueryStkResponse> QueryLipaNaMpesaTransactionAsync(LipaNaMpesaQuery lipaNaMpesaQuery, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<LipaNaMpesaQueryStkResponse>(lipaNaMpesaQuery, accesstoken, mpesaRequestEndpoint);
+            var validator = new LipaNaMpesaQueryValidator();
+            var results = await validator.ValidateAsync(lipaNaMpesaQuery);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<LipaNaMpesaQueryStkResponse>(lipaNaMpesaQuery, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -280,10 +358,16 @@ namespace MpesaSdk
         /// <param name="mpesaTransactionStatus"></param>
         /// <param name="accesstoken"></param>
         /// <param name="mpesaRequestEndpoint"></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns></returns>
-        public MpesaResponse QueryMpesaTransactionStatus(MpesaTransactionStatus mpesaTransactionStatus, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse QueryMpesaTransactionStatus(MpesaTransactionStatus mpesaTransactionStatus, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(mpesaTransactionStatus, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new MpesaTransactionStatusValidator();
+            var results = validator.Validate(mpesaTransactionStatus);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(mpesaTransactionStatus, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -292,10 +376,16 @@ namespace MpesaSdk
         /// <param name="mpesaTransactionStatus"></param>
         /// <param name="accesstoken"></param>
         /// <param name="mpesaRequestEndpoint"></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns></returns>
-        public async Task<MpesaResponse> QueryMpesaTransactionStatusAsync(MpesaTransactionStatus mpesaTransactionStatus, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> QueryMpesaTransactionStatusAsync(MpesaTransactionStatus mpesaTransactionStatus, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(mpesaTransactionStatus, accesstoken, mpesaRequestEndpoint);
+            var validator = new MpesaTransactionStatusValidator();
+            var results = await validator.ValidateAsync(mpesaTransactionStatus);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(mpesaTransactionStatus, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -304,10 +394,16 @@ namespace MpesaSdk
         /// <param name="customerToBusinessRegisterUrl">C2B Register URLs data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.RegisterC2BUrl</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public MpesaResponse RegisterC2BUrl(CustomerToBusinessRegisterUrl customerToBusinessRegisterUrl, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse RegisterC2BUrl(CustomerToBusinessRegisterUrl customerToBusinessRegisterUrl, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(customerToBusinessRegisterUrl, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new CustomerToBusinessRegisterUrlValidator();
+            var results = validator.Validate(customerToBusinessRegisterUrl);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(customerToBusinessRegisterUrl, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -316,10 +412,16 @@ namespace MpesaSdk
         /// <param name="customerToBusinessRegisterUrl">C2B Register URLs data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.RegisterC2BUrl</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public async Task<MpesaResponse> RegisterC2BUrlAsync(CustomerToBusinessRegisterUrl customerToBusinessRegisterUrl, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> RegisterC2BUrlAsync(CustomerToBusinessRegisterUrl customerToBusinessRegisterUrl, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(customerToBusinessRegisterUrl, accesstoken, mpesaRequestEndpoint);
+            var validator = new CustomerToBusinessRegisterUrlValidator();
+            var results = await validator.ValidateAsync(customerToBusinessRegisterUrl);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(customerToBusinessRegisterUrl, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -328,10 +430,16 @@ namespace MpesaSdk
         /// <param name="mpesaReversal">Reversal data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.ReverseMpesaTransaction</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public MpesaResponse ReverseMpesaTransaction(MpesaReversal mpesaReversal, string accesstoken, string mpesaRequestEndpoint)
+        public MpesaResponse ReverseMpesaTransaction(MpesaReversal mpesaReversal, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return MpesaPostRequestAsync<MpesaResponse>(mpesaReversal, accesstoken, mpesaRequestEndpoint).GetAwaiter().GetResult();
+            var validator = new MpesaReversalValidator();
+            var results = validator.Validate(mpesaReversal);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : MpesaPostRequestAsync<MpesaResponse>(mpesaReversal, accesstoken, mpesaRequestEndpoint, cancellationToken).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -340,10 +448,16 @@ namespace MpesaSdk
         /// <param name="mpesaReversal">Reversal data transfer object.</param>
         /// <param name="accesstoken">Acccesstoken retrieved by the <c>GetAuthTokenAsync</c> method.</param>
         /// <param name="mpesaRequestEndpoint">Set to <c>MpesaRequestEndpoint.ReverseMpesaTransaction</c></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>A JSON string containing data from MPESA API reposnse.</returns>
-        public async Task<MpesaResponse> ReverseMpesaTransactionAsync(MpesaReversal mpesaReversal, string accesstoken, string mpesaRequestEndpoint)
+        public async Task<MpesaResponse> ReverseMpesaTransactionAsync(MpesaReversal mpesaReversal, string accesstoken, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
-            return await MpesaPostRequestAsync<MpesaResponse>(mpesaReversal, accesstoken, mpesaRequestEndpoint);
+            var validator = new MpesaReversalValidator();
+            var results = await validator.ValidateAsync(mpesaReversal);
+
+            return !results.IsValid
+                ? throw new MpesaAPIException(HttpStatusCode.BadRequest, string.Join(Environment.NewLine, results.Errors.Select(x => x.ErrorMessage.ToString())))
+                : await MpesaPostRequestAsync<MpesaResponse>(mpesaReversal, accesstoken, mpesaRequestEndpoint, cancellationToken);
         }
 
         /// <summary>
@@ -351,30 +465,36 @@ namespace MpesaSdk
         /// </summary>
         /// <param name="mpesaDto">Data transfer object</param>
         /// <param name="accessToken">Mpesa Accesstoken</param>
-        /// <param name="mpesaEndpoint">Request endpoint</param>        
+        /// <param name="mpesaEndpoint">Request endpoint</param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>Mpesa API response based on the API requests made.</returns>
-        private async Task<T> MpesaPostRequestAsync<T>(object mpesaDto, string accessToken, string mpesaEndpoint) where T : new()
+        private async Task<T> MpesaPostRequestAsync<T>(object mpesaDto, string accessToken, string mpesaEndpoint, CancellationToken cancellationToken = default) where T : new()
         {
             _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             T result = new();
             string json = JsonConvert.SerializeObject(mpesaDto);
             var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var response = await _client.PostAsync(mpesaEndpoint, content, _token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var response = await _client.PostAsync(mpesaEndpoint, content, cancellationToken).ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
             {
-                await response.Content.ReadAsStringAsync().ContinueWith((Task<string> x) =>
+                await response.Content.ReadAsStreamAsync().ContinueWith((Task<Stream> stream) =>
                 {
-                    result = JsonConvert.DeserializeObject<T>(x.Result);
-                }, _token);
+                    using var reader = new StreamReader(stream.Result);
+                    using var json = new JsonTextReader(reader);
+                    result = _serializer.Deserialize<T>(json);
+                }, cancellationToken);
             }
             else
             {
                 MpesaErrorResponse mpesaErrorResponse = new MpesaErrorResponse();
-                await response.Content.ReadAsStringAsync().ContinueWith((Task<string> x) =>
+                await response.Content.ReadAsStreamAsync().ContinueWith((Task<Stream> stream) =>
                 {
-                    mpesaErrorResponse = JsonConvert.DeserializeObject<MpesaErrorResponse>(x.Result);
-                }, _token);
+                    using var reader = new StreamReader(stream.Result);
+                    using var json = new JsonTextReader(reader);
+                    mpesaErrorResponse = _serializer.Deserialize<MpesaErrorResponse>(json);
+                }, cancellationToken);
                 throw new MpesaAPIException(new HttpRequestException(mpesaErrorResponse.ErrorMessage), response.StatusCode, mpesaErrorResponse);
             }
             return result;
@@ -386,28 +506,34 @@ namespace MpesaSdk
         /// <param name="consumerKey"></param>
         /// <param name="consumerSecret"></param>
         /// <param name="mpesaRequestEndpoint"></param>
+        /// <param name="cancellationToken">Cancellation Token</param>
         /// <returns>string representing accesstoken for the mpesa api calls</returns>
-        private async Task<string> RequestAccessTokenAsync(string consumerKey, string consumerSecret, string mpesaRequestEndpoint)
+        private async Task<string> RequestAccessTokenAsync(string consumerKey, string consumerSecret, string mpesaRequestEndpoint, CancellationToken cancellationToken = default)
         {
             var keyBytes = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{consumerKey}:{consumerSecret}"));
 
             _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", keyBytes);
             MpesaAccessTokenResponse result = new MpesaAccessTokenResponse();
-            var response = await _client.GetAsync(mpesaRequestEndpoint, _token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            var response = await _client.GetAsync(mpesaRequestEndpoint, cancellationToken).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
-                await response.Content.ReadAsStringAsync().ContinueWith((Task<string> x) =>
+                await response.Content.ReadAsStreamAsync().ContinueWith((Task<Stream> stream) =>
                 {
-                    result = JsonConvert.DeserializeObject<MpesaAccessTokenResponse>(x.Result);
-                }, _token);
+                    using var reader = new StreamReader(stream.Result);
+                    using var json = new JsonTextReader(reader);
+                    result = _serializer.Deserialize<MpesaAccessTokenResponse>(json);
+                }, cancellationToken);
             }
             else
             {
                 MpesaErrorResponse mpesaErrorResponse = new MpesaErrorResponse();
-                await response.Content.ReadAsStringAsync().ContinueWith((Task<string> x) =>
+                await response.Content.ReadAsStreamAsync().ContinueWith((Task<Stream> stream) =>
                 {
-                    mpesaErrorResponse = JsonConvert.DeserializeObject<MpesaErrorResponse>(x.Result);
-                }, _token);
+                    using var reader = new StreamReader(stream.Result);
+                    using var json = new JsonTextReader(reader);
+                    mpesaErrorResponse = _serializer.Deserialize<MpesaErrorResponse>(json);
+                }, cancellationToken);
                 throw new MpesaAPIException(new HttpRequestException(mpesaErrorResponse.ErrorMessage), response.StatusCode, mpesaErrorResponse);
             }
             return result.AccessToken;

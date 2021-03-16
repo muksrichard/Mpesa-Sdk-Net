@@ -5,11 +5,11 @@ using MpesaSdk.Dtos;
 using MpesaSdk.Exceptions;
 using MpesaSdk.Interfaces;
 using MpesaSdk.Response;
-using MpesaSdk.Validators;
 using Newtonsoft.Json;
 using Prism.Navigation;
 using ReactiveUI;
 using System;
+using System.Linq;
 using System.Reactive;
 using System.Reactive.Linq;
 using System.Threading.Tasks;
@@ -94,8 +94,6 @@ namespace MpesaCross.ViewModels
 
         private async Task ExecuteMpesaStkQueryCommand(LipaNaMpesaOnlinePushStkResponse response)
         {
-            var validator = new LipaNaMpesaQueryValidator();
-
             try
             {
                 var LipaNaMpesaOnlineQuery = new LipaNaMpesaQuery
@@ -105,18 +103,6 @@ namespace MpesaCross.ViewModels
                         passkey: mpesaAPIConfiguration.PassKey,
                         checkoutRequestId: response.CheckoutRequestID
                     );
-
-                var validationResults = await validator.ValidateAsync(LipaNaMpesaOnlineQuery);
-
-                if (!validationResults.IsValid)
-                {
-                    Device.BeginInvokeOnMainThread(() =>
-                    {
-                        _dialogs.Alert(new AlertConfig()
-                            .SetMessage(validationResults.Errors.ToString())
-                            .SetTitle("Validation Error"));
-                    });
-                }
 
                 var stkQueryResults = await _mpesaClient.QueryLipaNaMpesaTransactionAsync(LipaNaMpesaOnlineQuery, await RetrieveAccessToken(), MpesaRequestEndpoint.QueryLipaNaMpesaOnlineTransaction);
 

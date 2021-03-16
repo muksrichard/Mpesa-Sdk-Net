@@ -4,7 +4,6 @@ using MpesaSdk;
 using MpesaSdk.Dtos;
 using MpesaSdk.Exceptions;
 using MpesaSdk.Interfaces;
-using MpesaSdk.Validators;
 using Newtonsoft.Json;
 using Prism.Navigation;
 using ReactiveUI;
@@ -100,8 +99,6 @@ namespace MpesaCross.ViewModels
 
         private async Task ExecuteMpesaStkCommand()
         {
-            var validator = new LipaNaMpesaOnlineValidator();
-
             try
             {
                 var mpesaPayment = new LipaNaMpesaOnline
@@ -119,21 +116,9 @@ namespace MpesaCross.ViewModels
                         passkey: mpesaAPIConfiguration.PassKey
                     );
 
-                var validationResults = await validator.ValidateAsync(mpesaPayment);
-
-                if (!validationResults.IsValid)
-                {
-                    Device.BeginInvokeOnMainThread(() =>
-                    {
-                        _dialogs.Alert(new AlertConfig()
-                            .SetMessage(validationResults.Errors.ToString())
-                            .SetTitle("Validation Error"));
-                    });
-                }
-
                 var stkResults = await _mpesaClient.MakeLipaNaMpesaOnlinePaymentAsync(mpesaPayment, await RetrieveAccessToken(), MpesaRequestEndpoint.LipaNaMpesaOnline);
                 stkResults.PhoneNumber = PhoneNumber;
-                
+
                 var navigationParams = new NavigationParameters();
                 navigationParams.Add("PushSTKResponse", JsonConvert.SerializeObject(stkResults));
                 await _navigationService.NavigateAsync("MpesaResultsPage", navigationParams);
